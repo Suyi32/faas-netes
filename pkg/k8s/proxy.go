@@ -6,10 +6,11 @@ package k8s
 
 import (
 	"fmt"
-	"math/rand"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	corelister "k8s.io/client-go/listers/core/v1"
 )
@@ -17,12 +18,37 @@ import (
 // watchdogPort for the OpenFaaS function watchdog
 const watchdogPort = 8080
 
+func max(numbers map[string]int64) string {
+	var maxNumber int64
+	var maxIPAddr string
+
+	if len(numbers) == 0 {
+		fmt.Println("[ERROR] No available endpoint address.")
+		os.Exit(1)
+	}
+
+	maxNumber = 0
+
+	for ipAddr, n := range numbers {
+		if n >= maxNumber {
+			maxNumber = n
+			maxIPAddr = ipAddr
+		}
+	}
+
+	return maxIPAddr
+}
+
 func NewFunctionLookup(ns string, lister corelister.EndpointsLister) *FunctionLookup {
+	var funcRouteMap2D map[string]map[string]int64
+	funcRouteMap2D = make(map[string]map[string]int64)
+
 	return &FunctionLookup{
 		DefaultNamespace: ns,
 		EndpointLister:   lister,
 		Listers:          map[string]corelister.EndpointsNamespaceLister{},
 		lock:             sync.RWMutex{},
+		routeMap2D:       funcRouteMap2D,
 	}
 }
 
@@ -31,7 +57,8 @@ type FunctionLookup struct {
 	EndpointLister   corelister.EndpointsLister
 	Listers          map[string]corelister.EndpointsNamespaceLister
 
-	lock sync.RWMutex
+	lock       sync.RWMutex
+	routeMap2D map[string]map[string]int64
 }
 
 func (f *FunctionLookup) GetLister(ns string) corelister.EndpointsNamespaceLister {
@@ -82,14 +109,37 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, error) {
 		return url.URL{}, fmt.Errorf("no subsets available for \"%s.%s\"", functionName, namespace)
 	}
 
-	all := len(svc.Subsets[0].Addresses)
+	// all := len(svc.Subsets[0].Addresses)
 	if len(svc.Subsets[0].Addresses) == 0 {
 		return url.URL{}, fmt.Errorf("no addresses in subset for \"%s.%s\"", functionName, namespace)
 	}
 
-	target := rand.Intn(all)
+	val, ok := l.routeMap2D[functionName]
+	if ok {
+		fmt.Println("Func", functionName, "'s ips ", val)
+	} else {
+		fmt.Println("make sub map")
+		l.routeMap2D[functionName] = make(map[string]int64)
+		for _, v := range svc.Subsets[0].Addresses {
+			// fmt.Println("i", i, ", v:", v)
+			_, ok := l.routeMap2D[functionName][v.IP]
+			if !ok {
+				l.routeMap2D[functionName][v.IP] = 0
+			}
+		}
+	}
 
-	serviceIP := svc.Subsets[0].Addresses[target].IP
+	// for _, v := range svc.Subsets[0].Addresses {
+	// 	// fmt.Println("i", i, ", v:", v)
+	// }
+
+	// target := rand.Intn(all)
+
+	// serviceIP := svc.Subsets[0].Addresses[target].IP
+
+	serviceIP := max(l.routeMap2D[functionName])
+
+	l.routeMap2D[functionName][serviceIP] = time.Now().UnixNano()
 
 	urlStr := fmt.Sprintf("http://%s:%d", serviceIP, watchdogPort)
 
