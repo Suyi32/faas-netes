@@ -230,7 +230,7 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, string, error) {
 	if err != nil {
 		return url.URL{}, "", err
 	}
-
+	// branch DT
 	contextString, _ := json.Marshal( GetConcurrency(serviceIP) )
 	// fmt.Println("[CONTEXT INFO]", functionName, string(contextString))
 	return *urlRes, string(contextString), nil
