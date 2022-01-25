@@ -173,7 +173,10 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 		defer response.Body.Close()
 	}
 
-	log.Printf("%s took %f seconds. Context: %s\n", functionName, seconds.Seconds(), contextInfo)
+	log.Printf("Req: %s: %d", functionName, response.StatusCode)
+	if response.StatusCode == 200 {
+		log.Printf("%s took %f seconds. Context: %s\n", functionName, seconds.Seconds(), contextInfo)
+	}
 
 	clientHeader := w.Header()
 	copyHeaders(clientHeader, &response.Header)
