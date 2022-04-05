@@ -77,7 +77,7 @@ func Test_FunctionLookup(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			url, err := resolver.Resolve(tc.funcName)
+			url, _, err := resolver.Resolve(tc.funcName)
 			if tc.expError == "" && err != nil {
 				t.Fatalf("expected no error, got %s", err)
 			}
