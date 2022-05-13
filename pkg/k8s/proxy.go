@@ -35,7 +35,7 @@ type ScaleServiceRequest struct {
 	Replicas    uint64 `json:"replicas"`
 }
 
-func QueryContext(endpoint string) (map[string]float64, error) {
+func QueryContext12(endpoint string) (map[string]float64, error) {
 	resp, err := http.Get(fmt.Sprintf("http://%s:%d/_/context", endpoint, watchdogPort))
 	if err != nil {
 		log.Println("Query Context Error")
