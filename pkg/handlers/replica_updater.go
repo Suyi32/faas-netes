@@ -68,6 +68,13 @@ func MakeReplicaUpdater(defaultNamespace string, clientset *kubernetes.Clientset
 		oldReplicas := *deployment.Spec.Replicas
 		replicas := int32(req.Replicas)
 
+		if ( replicas < oldReplicas ){
+			log.Printf("Already set replicas - %s %s, %d/%d\n", functionName, lookupNamespace, replicas, oldReplicas)
+			msg := "Will not scale down by routing."
+			w.Write([]byte(msg))
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		log.Printf("Set replicas - %s %s, %d/%d\n", functionName, lookupNamespace, replicas, oldReplicas)
 
 		deployment.Spec.Replicas = &replicas

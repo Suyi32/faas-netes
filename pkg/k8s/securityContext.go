@@ -26,8 +26,13 @@ func (f *FunctionFactory) ConfigureContainerUserID(deployment *appsv1.Deployment
 	if deployment.Spec.Template.Spec.Containers[0].SecurityContext == nil {
 		deployment.Spec.Template.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{}
 	}
-
+		
 	deployment.Spec.Template.Spec.Containers[0].SecurityContext.RunAsUser = functionUser
+	deployment.Spec.Template.Spec.Containers[0].SecurityContext.Capabilities = &corev1.Capabilities{Add: []corev1.Capability{"SYS_ADMIN"}}
+	var privileged bool = true
+	deployment.Spec.Template.Spec.Containers[0].SecurityContext.Privileged = &privileged
+	var allowPrivilegeEscalation bool = true
+	deployment.Spec.Template.Spec.Containers[0].SecurityContext.AllowPrivilegeEscalation = &allowPrivilegeEscalation
 }
 
 // ConfigureReadOnlyRootFilesystem will create or update the required settings and mounts to ensure

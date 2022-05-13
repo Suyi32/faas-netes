@@ -30,71 +30,16 @@ func containsIP(s []string, str string) bool {
 	return false
 }
 
-type Queue struct {
-	mu       sync.Mutex
-	capacity int
-	q        []string
-}
-
-// Insert inserts the item into the queue
-func (q *Queue) Insert(item int) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.q) < int(q.capacity) {
-		q.q = append(q.q, item)
-		return nil
-	}
-	return errors.New("Queue is full")
-}
-
-func (q *Queue) Tail() string {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.q) > 0 {
-		item := q.q[ len(q.q) - 1 ]
-		return item
-	}
-	return ""
-}
-
-func (q *Queue) RemoveTail() {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.q) > 0 {
-		q.q = q.q[:len(q.q) - 1]
-	}
-}
-
-// Remove removes the oldest element from the queue
-func (q *Queue) Remove() (int) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if len(q.q) > 0 {
-		item := q.q[0]
-		q.q = q.q[1:]
-		return item
-	}
-	return 0
-}
-
-// CreateQueue creates an empty queue with desired capacity
-func CreateQueue(capacity int) *Queue {
-	return &Queue{
-		capacity: capacity,
-		q:        make([]string, "", capacity),
-	}
-}
-
 type ScaleServiceRequest struct {
 	ServiceName string `json:"serviceName"`
 	Replicas    uint64 `json:"replicas"`
 }
 
-func QueryContext(endpoint string) map[string]float64 {
+func QueryContext(endpoint string) (map[string]float64, error) {
 	resp, err := http.Get(fmt.Sprintf("http://%s:%d/_/context", endpoint, watchdogPort))
 	if err != nil {
 		log.Println("Query Context Error")
-		panic(err.Error())
+		return nil, err
 	}
 	defer resp.Body.Close()
 
@@ -104,17 +49,20 @@ func QueryContext(endpoint string) map[string]float64 {
 		log.Println("Error while parsing context response.")
 		panic(err)
 	}
-	return respJson
+	return respJson, nil
 }
 
 func NewFunctionLookup(ns string, lister corelister.EndpointsLister) *FunctionLookup {
+	var MRTable map[string]string
+	MRTable = make(map[string]string)
+
 	return &FunctionLookup{
 		DefaultNamespace: ns,
 		EndpointLister:   lister,
 		Listers:          map[string]corelister.EndpointsNamespaceLister{},
 		lock:             sync.RWMutex{},
 		ScaleLocker:      0,
-		FuncQueue: 		  map[string]*Queue,
+		MRTable: 		  MRTable,
 	}
 }
 
@@ -125,7 +73,7 @@ type FunctionLookup struct {
 
 	lock sync.RWMutex
 	ScaleLocker uint32
-	FuncQueue map[string]Queue
+	MRTable map[string]string
 }
 
 func (f *FunctionLookup) GetLister(ns string) corelister.EndpointsNamespaceLister {
@@ -186,40 +134,61 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, string, error) {
 		goldIPs = append(goldIPs, v.IP)
 	}
 
-	if _, ok := l.FuncQueue[functionName]; !ok {
-		log.Println(functionName, "Queue Not exist. Create one")
-		l.FuncQueue[functionName] = CreateQueue(999)
-	}
+	var MRIP string
+	l.lock.Lock()
+	if _, ok := l.MRTable[functionName]; !ok {
+		log.Println(functionName, "MRTable Not exist. Create one")
+		l.MRTable[functionName] = goldIPs[0]
+	} 
+	l.lock.Unlock()
 
-	if len(l.FuncQueue[functionName].q) == 0 {
-		serviceIP := svc.Subsets[0].Addresses[0].IP
-		l.FuncQueue[functionName].q.Insert(serviceIP)
-	} else {
-		tailIP := l.FuncQueue[functionName].q.Tail()
-		if !containsIP(goldIPs, tailIP) {
-			l.FuncQueue[functionName].q.RemoveTail()
+	l.lock.RLock()
+	MRIP = l.MRTable[functionName]
+	l.lock.RUnlock()
+
+	var serviceIP string = "none"
+
+	if containsIP(goldIPs, MRIP) {
+		contextJson, err := QueryContext(MRIP)
+		if err != nil {
+			log.Println("Current IP not available.")
+		} else {
+			if (contextJson["MaxConn"] != contextJson["InFlight"]) {
+				serviceIP = MRIP
+				log.Println(functionName, "chooses MR", serviceIP)
+			}
 		}
-		if contextJson := QueryContext(tailIP)
 	}
 
+	if serviceIP == "none" {
+		for _, v := range svc.Subsets[0].Addresses {
+			contextJson, err := QueryContext(v.IP)
+			if err != nil {
+				log.Println("Current IP not available.")
+				continue
+			} else {
+				if (contextJson["MaxConn"] != contextJson["InFlight"]) {
+					serviceIP = v.IP
+					log.Println(functionName, "chooses", serviceIP)
+
+					l.lock.Lock()
+					l.MRTable[functionName] = serviceIP
+					l.lock.Unlock()
+					break
+				}
+			}
+		}
+	}
 	// target := rand.Intn(all)
 	// serviceIP := svc.Subsets[0].Addresses[target].IP
-	var serviceIP string = "none"
-	for _, v := range svc.Subsets[0].Addresses {
-		contextJson := QueryContext(v.IP)
-		if (contextJson["MaxConn"] != contextJson["InFlight"]) {
-			serviceIP = v.IP
-			log.Println(functionName, "chooses", serviceIP)
-			break
-		}
-	}
 	if serviceIP == "none" {
 		if !atomic.CompareAndSwapUint32(&l.ScaleLocker, 0, 1) {
 			return url.URL{}, "", fmt.Errorf("no addresses in subset for \"%s.%s\" now. Will scale later.", functionName, namespace)
 		} 
 		defer atomic.StoreUint32(&l.ScaleLocker, 0)
 
-		svcLater, err := nsEndpointLister.Get(functionName)
+		svcLater, err := l.GetLister(namespace).Get(functionName)
+		log.Println("[SCALE] Before", len(svc.Subsets[0].Addresses), "After", len(svcLater.Subsets[0].Addresses))
 		if len(svcLater.Subsets[0].Addresses) > len(svc.Subsets[0].Addresses)  {
 			return url.URL{}, "", fmt.Errorf("no addresses in subset for \"%s.%s\" now. Already scaled.", functionName, namespace)
 		}
@@ -236,6 +205,9 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, string, error) {
 			log.Println("Error while sending Function Scale request.")
 			panic(err)
 		}
+
+		log.Println("[SCALE]", functionName, "scale from", len(svcLater.Subsets[0].Addresses), "to", uint64(len(svc.Subsets[0].Addresses) + 1))
+
 		return url.URL{}, "", fmt.Errorf("no addresses in subset for \"%s.%s\" now. Will scale now.", functionName, namespace)
 	}
 
@@ -246,8 +218,15 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, string, error) {
 		return url.URL{}, "", err
 	}
 
-	contextString, _ := json.Marshal( QueryContext(serviceIP) )
-	return *urlRes, string(contextString), nil
+	contextRes, err := QueryContext(serviceIP)
+	var contextBytes []byte
+	if err != nil {
+		return url.URL{}, "", fmt.Errorf("Context not available")
+	} else {
+		contextBytes, _ = json.Marshal( contextRes )
+	}
+
+	return *urlRes, string(contextBytes), nil
 }
 
 func (l *FunctionLookup) verifyNamespace(name string) error {
