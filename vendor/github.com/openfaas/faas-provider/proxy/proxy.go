@@ -27,7 +27,11 @@ import (
 	"net/http"
 	"net/url"
 	"time"
-
+	"encoding/json"
+	"bytes"
+	"fmt"
+	"strings"
+	
 	"github.com/gorilla/mux"
 	"github.com/openfaas/faas-provider/httputil"
 	"github.com/openfaas/faas-provider/types"
@@ -44,7 +48,9 @@ const (
 // BaseURLResolver.Resolve will receive the function name and should return the URL of the
 // function service.
 type BaseURLResolver interface {
-	Resolve(functionName string) (url.URL, string, error)
+	// Resolve(functionName string) (url.URL, string, error)
+	Resolve(functionName string) (url.URL, map[string]float64, error)
+	GetMLServerIPTab(functionName string) (map[string]string)
 }
 
 // NewHandlerFunc creates a standard http.HandlerFunc to proxy function requests.
@@ -176,7 +182,23 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 	// log.Printf("%s took %f seconds\n", functionName, seconds.Seconds())
 	log.Printf("Req: %s: %d", functionName, response.StatusCode)
 	if response.StatusCode == 200 {
-		log.Printf("%s took %f seconds. Context: %s\n", functionName, seconds.Seconds(), contextInfo)
+		// reqJson["X"], reqJson["cur_label"] reqJson["duration"] reqJson["pred_prob"] reqJson["fc_name"]
+		contextInfo["Duration"] = seconds.Seconds()
+		contextBytes, _ := json.Marshal( contextInfo )
+		log.Printf("%s took %f seconds. Context: %s\n", functionName, seconds.Seconds(), string(contextBytes))
+		
+		functionName = strings.TrimSuffix(functionName, "-noc")
+		// mlClientURL := fmt.Sprintf("http://%s:8080/_/changeStatus", functionAddr.Host)
+		mlIP, _ := resolver.GetMLServerIPTab(functionName)[functionName]
+		// if !found {
+		// 	log.Fatal(functionName, "ML IP Not exist")
+		// }
+		log.Println(functionName, "ML IP", mlIP)
+		mlURL := fmt.Sprintf("http://%s:8080/recordData", mlIP)
+		_, err := http.Post(mlURL, "application/json", bytes.NewBuffer(contextBytes))
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	clientHeader := w.Header()

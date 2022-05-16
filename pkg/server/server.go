@@ -36,7 +36,8 @@ func New(client clientset.Interface,
 	endpointsInformer coreinformer.EndpointsInformer,
 	deploymentLister v1apps.DeploymentLister,
 	clusterRole bool,
-	cfg config.BootstrapConfig) *Server {
+	cfg config.BootstrapConfig,
+	clientset *kubernetes.Clientset) *Server {
 
 	functionNamespace := "openfaas-fn"
 	if namespace, exists := os.LookupEnv("function_namespace"); exists {
@@ -49,7 +50,7 @@ func New(client clientset.Interface,
 	}
 
 	lister := endpointsInformer.Lister()
-	functionLookup := k8s.NewFunctionLookup(functionNamespace, lister)
+	functionLookup := k8s.NewFunctionLookup(functionNamespace, lister, clientset)
 
 	bootstrapConfig := types.FaaSConfig{
 		ReadTimeout:  cfg.FaaSConfig.ReadTimeout,

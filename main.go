@@ -213,7 +213,7 @@ func runController(setup serverSetup) {
 	operator := false
 	listers := startInformers(setup, stopCh, operator)
 
-	functionLookup := k8s.NewFunctionLookup(config.DefaultFunctionNamespace, listers.EndpointsInformer.Lister())
+	functionLookup := k8s.NewFunctionLookup(config.DefaultFunctionNamespace, listers.EndpointsInformer.Lister(), kubeClient)
 
 	bootstrapHandlers := providertypes.FaaSHandlers{
 		FunctionProxy:        proxy.NewHandlerFunc(config.FaaSConfig, functionLookup),
@@ -261,7 +261,7 @@ func runOperator(setup serverSetup, cfg config.BootstrapConfig) {
 		factory,
 	)
 
-	srv := server.New(faasClient, kubeClient, listers.EndpointsInformer, listers.DeploymentInformer.Lister(), cfg.ClusterRole, cfg)
+	srv := server.New(faasClient, kubeClient, listers.EndpointsInformer, listers.DeploymentInformer.Lister(), cfg.ClusterRole, cfg, kubeClient)
 
 	go srv.Start()
 	if err := ctrl.Run(1, stopCh); err != nil {
