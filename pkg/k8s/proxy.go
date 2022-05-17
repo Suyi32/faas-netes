@@ -52,9 +52,24 @@ func QueryContext(endpoint string) (map[string]float64, error) {
 	return respJson, nil
 }
 
+func QueryStatus(endpoint string) (map[string]int64, error) {
+	resp, err := http.Get(fmt.Sprintf("http://%s:%d/_/status", endpoint, watchdogPort))
+	if err != nil {
+		log.Println("Query Statue Error in QueryStatus")
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var respJson map[string]int64
+	err = json.NewDecoder(resp.Body).Decode(&respJson)
+	if err != nil {
+		log.Println("Error while parsing context response.")
+		panic(err)
+	}
+	return respJson, nil
+}
+
 func NewFunctionLookup(ns string, lister corelister.EndpointsLister) *FunctionLookup {
-	var MRTable map[string]string
-	MRTable = make(map[string]string)
 
 	return &FunctionLookup{
 		DefaultNamespace: ns,
@@ -62,7 +77,6 @@ func NewFunctionLookup(ns string, lister corelister.EndpointsLister) *FunctionLo
 		Listers:          map[string]corelister.EndpointsNamespaceLister{},
 		lock:             sync.RWMutex{},
 		ScaleLocker:      0,
-		MRTable: 		  MRTable,
 	}
 }
 
@@ -73,7 +87,6 @@ type FunctionLookup struct {
 
 	lock sync.RWMutex
 	ScaleLocker uint32
-	MRTable map[string]string
 }
 
 func (f *FunctionLookup) GetLister(ns string) corelister.EndpointsNamespaceLister {
@@ -129,52 +142,25 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, string, error) {
 		return url.URL{}, "", fmt.Errorf("no addresses in subset for \"%s.%s\"", functionName, namespace)
 	}
 
-	goldIPs := []string{}
-	for _, v := range svc.Subsets[0].Addresses {
-		goldIPs = append(goldIPs, v.IP)
-	}
-
-	var MRIP string
-	l.lock.Lock()
-	if _, ok := l.MRTable[functionName]; !ok {
-		log.Println(functionName, "MRTable Not exist. Create one")
-		l.MRTable[functionName] = goldIPs[0]
-	} 
-	l.lock.Unlock()
-
-	l.lock.RLock()
-	MRIP = l.MRTable[functionName]
-	l.lock.RUnlock()
-
+	var maxLastTime int64 = -1
 	var serviceIP string = "none"
-
-	if containsIP(goldIPs, MRIP) {
-		contextJson, err := QueryContext(MRIP)
+	for _, v := range svc.Subsets[0].Addresses {
+		statusJson, err := QueryStatus(v.IP)
 		if err != nil {
 			log.Println("Current IP not available.")
+			continue
 		} else {
-			if (contextJson["MaxConn"] != contextJson["InFlight"]) {
-				serviceIP = MRIP
-				log.Println(functionName, "chooses MR", serviceIP)
-			}
-		}
-	}
-
-	if serviceIP == "none" {
-		for _, v := range svc.Subsets[0].Addresses {
-			contextJson, err := QueryContext(v.IP)
-			if err != nil {
-				log.Println("Current IP not available.")
-				continue
-			} else {
+			// log.Println(functionName, statusJson["LastTime"], maxLastTime, v.IP)
+			if statusJson["LastTime"] > maxLastTime { // greedy select a container
+				contextJson, err := QueryContext(v.IP)
+				if err != nil {
+					log.Println("Current IP not available.", err.Error())
+					continue
+					// log.Fatal(err.Error())
+				}
 				if (contextJson["MaxConn"] != contextJson["InFlight"]) {
+					maxLastTime = statusJson["LastTime"]
 					serviceIP = v.IP
-					log.Println(functionName, "chooses", serviceIP)
-
-					l.lock.Lock()
-					l.MRTable[functionName] = serviceIP
-					l.lock.Unlock()
-					break
 				}
 			}
 		}
