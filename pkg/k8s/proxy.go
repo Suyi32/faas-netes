@@ -42,7 +42,7 @@ type ScaleServiceRequest struct {
 func QueryContext(endpoint string) (map[string]float64, error) {
 	resp, err := http.Get(fmt.Sprintf("http://%s:%d/_/context", endpoint, watchdogPort))
 	if err != nil {
-		log.Println("Query Context Error in QueryContext")
+		log.Println("Query Context Error in QueryContext", endpoint)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -59,7 +59,7 @@ func QueryContext(endpoint string) (map[string]float64, error) {
 func QueryStatus(endpoint string) (map[string]int64, error) {
 	resp, err := http.Get(fmt.Sprintf("http://%s:%d/_/status", endpoint, watchdogPort))
 	if err != nil {
-		log.Println("Query Statue Error in QueryStatus")
+		log.Println("Query Statue Error in QueryStatus", endpoint)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -173,38 +173,34 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, map[string]float64, erro
 		return url.URL{}, nullContext, fmt.Errorf("no addresses in subset for \"%s.%s\"", functionName, namespace)
 	}
 
-	// goldIPs := []string{}
-	// for _, v := range svc.Subsets[0].Addresses {
-	// 	goldIPs = append(goldIPs, v.IP)
-	// }
-
 	var serviceIP string = "none"
 
 	ifSafePolicy := 0
 	var maxLastTime int64 = -1
-
+	var maxHostID int64 = 0
 	// find the pods that has max lastTime and label == 0 and safe policy and available for new requests.
 	for _, v := range svc.Subsets[0].Addresses {
 		statusJson, err := QueryStatus(v.IP)
-		log.Println(functionName, "statusJson", statusJson)
 		if err != nil {
-			log.Println("Current IP not available.")
+			log.Println("Current IP not available.",  err.Error(), functionName, v.IP)
 			continue
 		} else {
 			if statusJson["Safe"] == 1 {
 				ifSafePolicy = 1
 				if statusJson["Label"] == 0 {  // find negative container
-					log.Println(functionName, statusJson["LastTime"], maxLastTime, v.IP)
-					if statusJson["LastTime"] > maxLastTime { // greedy select a container
-						contextJson, err := QueryContext(v.IP)
-						if err != nil {
-							log.Println("Current IP not available.", err.Error())
-							continue
-							// log.Fatal(err.Error())
-						}
-						if (contextJson["MaxConn"] != contextJson["InFlight"]) {
-							maxLastTime = statusJson["LastTime"]
-							serviceIP = v.IP
+					if statusJson["HostId"] > maxHostID {
+						if statusJson["LastTime"] > maxLastTime { // greedy select a container
+							contextJson, err := QueryContext(v.IP)
+							if err != nil {
+								log.Println("Current IP not available.", err.Error(), functionName, v.IP)
+								continue
+								// log.Fatal(err.Error())
+							}
+							if (contextJson["MaxConn"] != contextJson["InFlight"]) {
+								maxHostID = statusJson["HostId"]
+								maxLastTime = statusJson["LastTime"]
+								serviceIP = v.IP
+							}
 						}
 					}
 				}
@@ -223,29 +219,31 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, map[string]float64, erro
 		}
 		
 		log.Println("Choose NOC function", functionName)
-		svc, err := nsEndpointLister.Get(functionName)
+		// if use svc :=, will create a svc. The svc outside the loop is always one. So, do not use := here
+		svc, err = nsEndpointLister.Get(functionName)
 		if err != nil {
 			return url.URL{}, nullContext, fmt.Errorf("error listing \"%s.%s\": %s", functionName, namespace, err.Error())
 		}
 
 		// Scale from 0 if not IP available
 		if len(svc.Subsets) == 0 || len(svc.Subsets[0].Addresses) == 0{
+			log.Println("Scaling from zero")
 			if !atomic.CompareAndSwapUint32(&l.ScaleLocker, 0, 1) {
 				return url.URL{}, nullContext, fmt.Errorf("no addresses in subset for \"%s.%s\" now. Will scale later.", functionName, namespace)
 			} 
 			defer atomic.StoreUint32(&l.ScaleLocker, 0)
-	
-			svcLater, err := l.GetLister(namespace).Get(functionName)
-			log.Println("[SCALE] Before", len(svc.Subsets[0].Addresses), "After", len(svcLater.Subsets[0].Addresses))
-			if len(svcLater.Subsets[0].Addresses) > len(svc.Subsets[0].Addresses)  {
-				return url.URL{}, nullContext, fmt.Errorf("no addresses in subset for \"%s.%s\" now. Already scaled.", functionName, namespace)
+
+			if len(svc.Subsets) == 0 {
+				log.Println("[SCALE] OC Before: len(svc.Subsets)", len(svc.Subsets))
+			} else if len(svc.Subsets[0].Addresses) == 0 {
+				log.Println("[SCALE] OC Before: len(svc.Subsets[0].Addresses)", len(svc.Subsets[0].Addresses))
 			}
-	
+
 			provider_url := "http://127.0.0.1:8081/"
 			urlPath := fmt.Sprintf("%ssystem/scale-function/%s?namespace=%s", provider_url, functionName, "openfaas-fn")
 			scaleReq := ScaleServiceRequest{
 				ServiceName: functionName,
-				Replicas:    uint64(len(svc.Subsets[0].Addresses) + 1),
+				Replicas:    uint64(1),
 			}
 			requestBody, err := json.Marshal(scaleReq)
 			_, err = http.Post(urlPath, "application/json", bytes.NewBuffer(requestBody))
@@ -253,8 +251,12 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, map[string]float64, erro
 				log.Println("Error while sending Function Scale request.")
 				panic(err)
 			}
-	
-			log.Println("[SCALE]", functionName, "scale from", len(svcLater.Subsets[0].Addresses), "to", uint64(len(svc.Subsets[0].Addresses) + 1))
+
+			if len(svc.Subsets) == 0 {
+				log.Println("[SCALE]", functionName, "scale from", len(svc.Subsets), "to", 1)
+			} else if len(svc.Subsets[0].Addresses) == 0 {
+				log.Println("[SCALE]", functionName, "scale from", len(svc.Subsets[0].Addresses), "to", 1)
+			}
 			
 			// return as original
 			if len(svc.Subsets) == 0 {
@@ -264,25 +266,28 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, map[string]float64, erro
 				return url.URL{}, nullContext, fmt.Errorf("no addresses in subset for \"%s.%s\". Will Scale Now", functionName, namespace)
 			}
 		}
-
-		var maxLastTime int64 = -1
+		maxLastTime = -1
+		maxHostID = 0
 		// find the pods that has max lastTime and available for new requests.
 		for _, v := range svc.Subsets[0].Addresses {
 			statusJson, err := QueryStatus(v.IP)
 			if err != nil {
-				log.Println("Current IP not available.")
+				log.Println("Current IP not available.", err.Error(), functionName, v.IP)
 				continue
 			} else {
-				if statusJson["LastTime"] > maxLastTime {
-					contextJson, err := QueryContext(v.IP)
-					if err != nil {
-						log.Println("Current IP not available.", err.Error())
-						continue
-						// log.Fatal(err.Error())
-					}
-					if (contextJson["MaxConn"] != contextJson["InFlight"]) {
-						maxLastTime = statusJson["LastTime"]
-					serviceIP = v.IP
+				if statusJson["HostId"] > maxHostID {
+					if statusJson["LastTime"] > maxLastTime {
+						contextJson, err := QueryContext(v.IP)
+						if err != nil {
+							log.Println("Current IP not available.", err.Error(), functionName, v.IP)
+							continue
+							// log.Fatal(err.Error())
+						}
+						if (contextJson["MaxConn"] != contextJson["InFlight"]) {
+							maxHostID = statusJson["HostId"]
+							maxLastTime = statusJson["LastTime"]
+							serviceIP = v.IP
+						}
 					}
 				}
 			}
@@ -297,6 +302,7 @@ func (l *FunctionLookup) Resolve(name string) (url.URL, map[string]float64, erro
 		} 
 		defer atomic.StoreUint32(&l.ScaleLocker, 0)
 
+		log.Println("[SCALE] FuncName", functionName)
 		svcLater, err := l.GetLister(namespace).Get(functionName)
 		log.Println("[SCALE] Before", len(svc.Subsets[0].Addresses), "After", len(svcLater.Subsets[0].Addresses))
 		if len(svcLater.Subsets[0].Addresses) > len(svc.Subsets[0].Addresses)  {

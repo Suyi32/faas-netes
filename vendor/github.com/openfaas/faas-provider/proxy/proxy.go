@@ -195,9 +195,19 @@ func proxyRequest(w http.ResponseWriter, originalReq *http.Request, proxyClient 
 		// }
 		log.Println(functionName, "ML IP", mlIP)
 		mlURL := fmt.Sprintf("http://%s:8080/recordData", mlIP)
-		_, err := http.Post(mlURL, "application/json", bytes.NewBuffer(contextBytes))
+		recordResp, err := http.Post(mlURL, "application/json", bytes.NewBuffer(contextBytes))
 		if err != nil {
-			log.Fatal(err)
+			// log.Fatal(err)
+			//! Bug: Post "http://192.168.90.255:8080/recordData": dial tcp 192.168.90.255:8080: 
+			// Update: Ignore the data point if error
+			if strings.Contains(err.Error(), "i/o timeout") {
+				log.Println("Catched Error", err.Error())
+			} else {
+				log.Println("recordData Uncatched Error", err.Error())
+				// Ignore the data point then
+			}
+		} else {
+			defer recordResp.Body.Close()
 		}
 	}
 
